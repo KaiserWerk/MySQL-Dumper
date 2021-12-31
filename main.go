@@ -6,57 +6,76 @@ import (
 	"fmt"
 	"github.com/JamesStewy/go-mysqldump"
 	"log"
-	"os"
+	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
-var (
-	dsn string = ""
-)
+/*
+  - implement max. number of retained backups
+  - give a running instance a unique ID, like 'md-hostname-node'
+  - send backup to remote server
+  - get restore commands to restore a local backup
+*/
 
 func main() {
-	dsnPtr := flag.String("dsn", "", "The DSN to use for the MySQL connection")
+	confFilePtr := flag.String("config", "", "The configuration file to read")
 	flag.Parse()
 
-	if d := os.Getenv("MYSQLDUMPER_DSN"); d != "" {
-		dsn = d
-	} else if *dsnPtr == "" {
-		dsn = *dsnPtr
+	if *confFilePtr != "" {
+		setConfigFile(*confFilePtr)
 	}
 
-	if dsn == "" {
-		log.Println("DSN is not set!")
+	config, created, err := setupConfig()
+	if err != nil {
+		log.Println("could not set up configuration", err.Error())
 		return
 	}
 
+	if created {
+		log.Println("configuration file created; exiting")
+		return
+	}
+
+	fn, err := createDump(config)
+	if err != nil {
+		log.Println("could not create first dump")
+		return
+	}
+	fmt.Printf("created first backup with name '%s'\n", fn)
+
+	t := time.NewTicker(time.Duration(config.BackupInterval) * time.Minute)
+	for {
+		select {
+		case <-t.C:
+			if fn, err = createDump(config); err != nil {
+				log.Println("could not create dump:", err.Error())
+			} else {
+				fmt.Printf("Backup file '%s' created\n", fn)
+			}
+		}
+	}
 }
 
-func createDump() error {
-	dumpDir := "dumps"                                              // you should create this directory
-	dumpFilenameFormat := fmt.Sprintf("%s-20060102T150405", dbname) // accepts time layout string and add .sql at the end of file
+func createDump(conf *appConfig) (string, error) {
+	parts := strings.Split(conf.DSN, "/")
+	dumpFilenameFormat := fmt.Sprintf("%s_2006-01_02-15_04_05", parts[len(parts)-1])
 
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", username, password, hostname, port, dbname))
+	db, err := sql.Open("mysql", conf.DSN)
 	if err != nil {
-		fmt.Println("Error opening database: ", err)
-		return
+		return "", fmt.Errorf("error opening database: %s", err.Error())
 	}
 
-	// Register database with mysqldump
-	dumper, err := mysqldump.Register(db, dumpDir, dumpFilenameFormat)
+	dumper, err := mysqldump.Register(db, conf.BackupPath, dumpFilenameFormat)
 	if err != nil {
-		fmt.Println("Error registering databse:", err)
-		return
+		return "", fmt.Errorf("error registering database: %s", err)
 	}
 
-	// Dump database to file
 	resultFilename, err := dumper.Dump()
 	if err != nil {
-		fmt.Println("Error dumping:", err)
-		return
+		return "", fmt.Errorf("error dumping: %s", err.Error())
 	}
-	fmt.Printf("File is saved to %s", resultFilename)
 
-	// Close dumper and connected database
-	dumper.Close()
+	return resultFilename, dumper.Close()
 }
