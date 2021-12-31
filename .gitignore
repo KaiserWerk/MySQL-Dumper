@@ -2,3 +2,6 @@
 
 *.log
 *.exe
+*.yaml
+!assets/config/app.dist.yaml
+*.sql
